@@ -1,10 +1,20 @@
-import os
 import requests
 import json
+from typing import Dict, Any, Optional
 
-def capture_variable_info(var_name, var_value):
-    info = {"name": var_name, "type": None, "value": None, "shape": None, "min": None, "max": None}
+
+def capture_variable_info(var_name: str, var_value: Any) -> Dict[str, Any]:
+    """Capture information about a variable."""
+    info = {
+        "name": var_name,
+        "type": None,
+        "value": None,
+        "shape": None,
+        "min": None,
+        "max": None
+    }
     
+    # Try NumPy
     try:
         import numpy as np
         if isinstance(var_value, np.ndarray):
@@ -13,9 +23,10 @@ def capture_variable_info(var_name, var_value):
             info["min"] = float(var_value.min())
             info["max"] = float(var_value.max())
             return info
-    except ImportError:
+    except:
         pass
-
+    
+    # Try PyTorch
     try:
         import torch
         if isinstance(var_value, torch.Tensor):
@@ -24,47 +35,54 @@ def capture_variable_info(var_name, var_value):
             info["min"] = float(var_value.min().item())
             info["max"] = float(var_value.max().item())
             return info
-    except ImportError:
+    except:
         pass
 
+    # Handle primitives
     if isinstance(var_value, (int, float)):
         info["type"] = "float" if isinstance(var_value, float) else "int"
         info["value"] = float(var_value)
         return info
-
+    
     return info
 
 
-def verify(api_key: str = None, project_id: str = None, step: int = None, api_base_url: str = "https://www.crekai.com/api"):
-    """
-    Universal CrekAI Verification function.
-    Automatically captures all variables and submits verification to CrekAI.
+def capture_variables() -> Dict[str, Dict[str, Any]]:
+    """Capture all relevant variables from the caller's scope."""
+    import inspect
     
-    If api_key or project_id are not provided, it tries to read them from environment variables:
-      - CREKAI_API_KEY
-      - CREKAI_PROJECT_ID
-    """
-    # Read from environment if not passed
-    api_key = api_key or os.getenv("CREKAI_API_KEY")
-    project_id = project_id or os.getenv("CREKAI_PROJECT_ID")
-
-    if not api_key or not project_id:
-        raise ValueError("Missing API key or project ID. Provide them directly or set CREKAI_API_KEY and CREKAI_PROJECT_ID in environment.")
-
-    print("🔍 CrekAI Verification\n")
-    print("📊 Capturing variables...")
-
+    # Get the caller's global scope (2 frames back: capture_variables -> verify -> user code)
+    frame = inspect.currentframe()
+    try:
+        caller_globals = frame.f_back.f_back.f_globals
+    finally:
+        del frame
+    
     variables = {}
-    frame = globals()
-
-    for var_name, var_value in list(frame.items()):
+    excluded_names = {
+        'In', 'Out', 'get_ipython', 'exit', 'quit', 
+        'requests', 'json', 'np', 'torch', 'verify',
+        '__name__', '__doc__', '__package__', '__loader__',
+        '__spec__', '__annotations__', '__builtins__'
+    }
+    
+    print("📊 Capturing variables...")
+    
+    for var_name, var_value in list(caller_globals.items()):
+        # Skip private/excluded variables
         if var_name.startswith('_'):
             continue
-        if var_name in ['In', 'Out', 'get_ipython', 'exit', 'quit', 'requests', 'json', 'np', 'torch', 'verify', 'capture_variable_info', 'os']:
+        if var_name in excluded_names:
             continue
+        
+        # Skip modules
+        if hasattr(var_value, '__file__'):
+            continue
+            
+        # Skip callable objects (unless they have shape attribute)
         if callable(var_value) and not hasattr(var_value, 'shape'):
             continue
-
+        
         try:
             info = capture_variable_info(var_name, var_value)
             if info["type"]:
@@ -72,36 +90,92 @@ def verify(api_key: str = None, project_id: str = None, step: int = None, api_ba
                 print(f"   ✓ {var_name}")
         except:
             pass
+    
+    return variables
 
+
+def verify(
+    user_token: str,
+    project_id: str,
+    step: int,
+    api_base_url: str = "https://www.crekai.com/api"
+) -> None:
+    """
+    Verify your CrekAI assignment by capturing and submitting variables.
+    
+    Args:
+        user_token: Your CrekAI user token
+        project_id: Project identifier (e.g., "learn-numpy")
+        step: Current step number
+        api_base_url: API base URL (default: "https://www.crekai.com/api")
+    
+    Example:
+        >>> from crekai_verifier import verify
+        >>> import numpy as np
+        >>> arr = np.array([1, 2, 3])
+        >>> verify(
+        ...     user_token="your_token_here",
+        ...     project_id="learn-numpy",
+        ...     step=1
+        ... )
+    """
+    print("🔍 CrekAI Verification\n")
+    
+    # Capture variables
+    variables = capture_variables()
+    
+    # Submit to API
     print("\n🚀 Submitting...\n")
-
+    
     try:
         response = requests.post(
             f"{api_base_url}/track-execution",
             json={
-                "token": api_key,
+                "token": user_token,
                 "project_id": project_id,
                 "step": step,
                 "code": "executed",
-                "output": {"variables": variables},
+                "output": {"variables": variables}
             },
             timeout=10
         )
 
-        if response.status_code == 200:
+        data = {}
+        try:
             data = response.json()
+        except:
+            pass
+
+        if response.status_code == 200:
             print("=" * 60)
             print("✅ SUCCESS! Assignment Verified!")
             print("=" * 60)
             print(f"\n{data.get('message', '')}")
+
+            if data.get('already_completed'):
+                print("\n🔁 Step already completed — re-verified successfully!")
+
             if data.get('next_step'):
                 print(f"\n🚀 Step {data['next_step']} unlocked!")
+
             print("\n👉 Return to CrekAI")
             print("=" * 60)
+
+        elif response.status_code == 400:
+            message = data.get("message", "")
+            if "Re-verification failed" in message:
+                print("⚠️ Re-verification failed")
+                print("\nYou already passed earlier, but your new code's output doesn't match the correct one.")
+            else:
+                print("❌ Validation Failed")
+                print(f"\n{message or 'Check your code carefully'}")
+
+        elif response.status_code == 401:
+            print("❌ Invalid Token - Please regenerate your token in CrekAI.")
+
         else:
-            print("❌ Validation Failed")
-            error_data = response.json()
-            print(f"\n{error_data.get('message', 'Check your code')}")
+            print(f"❌ Unexpected Error ({response.status_code})")
+            print(data.get("error", "Something went wrong."))
 
     except Exception as e:
         print(f"❌ Error: {e}")
