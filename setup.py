@@ -8,7 +8,7 @@ setup(
     description="Universal CrekAI Verification Tool for Colab",
     long_description=open("README.md", encoding="utf-8").read(),
     long_description_content_type="text/markdown",
-    url="https://github.com/yourusername/crekai-verify",  # optional
+    url="https://github.com/TheVixhal/crekai-verify",  # optional
     packages=find_packages(),
     install_requires=[
         "requests>=2.20.0"
